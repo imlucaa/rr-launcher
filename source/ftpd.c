@@ -27,6 +27,7 @@
 #include "pad.h"
 #include "shutdown.h"
 #include "util.h"
+#include "sd.h"
 #include <wiisocket.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -85,6 +86,7 @@
     the latest events (connections, each file received or sent, errors).
 */
 #define FTPD_HEADER_ROW 1
+#define FTPD_SD_ROW 4
 #define FTPD_CONNECTION_ROW 5
 #define FTPD_TOTALS_ROW 6
 #define FTPD_LOG_ROW 8
@@ -190,12 +192,27 @@ static void ftpd_show_totals(const struct ftpd_session *s)
 
 static void ftpd_size_text(char *out, int out_size, unsigned long long bytes)
 {
-    if (bytes >= 1024 * 1024)
+    if (bytes >= 1024ULL * 1024 * 1024)
+        snprintf(out, out_size, "%llu.%llu GB", bytes / (1024ULL * 1024 * 1024), bytes * 10 / (1024ULL * 1024 * 1024) % 10);
+    else if (bytes >= 1024 * 1024)
         snprintf(out, out_size, "%llu.%llu MB", bytes / (1024 * 1024), bytes * 10 / (1024 * 1024) % 10);
     else if (bytes >= 1024)
         snprintf(out, out_size, "%llu KB", (bytes + 512) / 1024);
     else
         snprintf(out, out_size, "%llu bytes", bytes);
+}
+
+static void ftpd_show_free_space(void)
+{
+    unsigned long long free_bytes = 0;
+    if (rrc_result_is_error(rrc_sd_get_free_space(&free_bytes)))
+    {
+        ftpd_show(FTPD_SD_ROW, "SD card: free space unknown");
+        return;
+    }
+    char size[24];
+    ftpd_size_text(size, sizeof(size), free_bytes);
+    ftpd_show(FTPD_SD_ROW, "SD card: %s free", size);
 }
 
 static char ftpd_log_lines[FTPD_LOG_LINES][FTPD_LOG_WIDTH];
@@ -1238,6 +1255,7 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
     rrc_con_print_text_centered(FTPD_HEADER_ROW, address);
     rrc_con_print_text_centered(FTPD_HEADER_ROW + 1, "In Wheel Wizard+: Settings > Sync to Wii");
     rrc_con_print_text_centered(FTPD_HEADER_ROW + 2, "A: send save and VR to PC   B: done");
+    ftpd_show_free_space();
     ftpd_show(FTPD_CONNECTION_ROW, "Waiting for Wheel Wizard+...");
     ftpd_show_totals(&s);
     ftpd_log_count = 0;
@@ -1284,6 +1302,7 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
             if (s.logged_in)
             {
                 ftpd_show(FTPD_CONNECTION_ROW, "Waiting for Wheel Wizard+...");
+                ftpd_show_free_space();
                 ftpd_log("Wheel Wizard+ disconnected");
                 if (s.copy_requested && s.session_sent > 0)
                 {
