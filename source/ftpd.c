@@ -116,6 +116,7 @@ struct ftpd_session
     int files_sent;
     /* Files sent during this connection; a finished copy to the PC clears the A button request. */
     int session_sent;
+    int session_received;
     bool copy_requested;
     bool logged_in;
     char peer[16];
@@ -195,7 +196,7 @@ static void ftpd_show(int row, const char *fmt, ...)
 
 static void ftpd_show_totals(const struct ftpd_session *s)
 {
-    ftpd_show(FTPD_TOTALS_ROW, "Received: %d files   Sent: %d files", *s->files_received, s->files_sent);
+    ftpd_show(FTPD_TOTALS_ROW, "Received %d   Sent %d", *s->files_received, s->files_sent);
 }
 
 static void ftpd_size_text(char *out, int out_size, unsigned long long bytes)
@@ -251,7 +252,7 @@ static void ftpd_vlog(bool replace, const char *fmt, va_list args)
     char *line = ftpd_log_lines[ftpd_log_count - 1];
     time_t now = time(NULL);
     struct tm *tm = localtime(&now);
-    int stamp = tm != NULL ? (int)strftime(line, FTPD_LOG_WIDTH, "%H:%M:%S ", tm) : 0;
+    int stamp = tm != NULL ? (int)strftime(line, FTPD_LOG_WIDTH, "%H:%M ", tm) : 0;
     vsnprintf(line + stamp, FTPD_LOG_WIDTH - stamp, fmt, args);
     // Long file paths lose their middle, so both the time and the file name stay readable.
     ftpd_fit(line, rrc_con_get_cols() - 2, stamp);
@@ -513,8 +514,8 @@ static void ftpd_cmd_stor(struct ftpd_session *s, const char *arg)
     }
 
     const char *name = strrchr(path, '/');
-    // The path without "sd:/", e.g. "RetroRewind6/Patches/x.szs".
-    const char *label = path + 4;
+    // Just the file name, e.g. "rksys.dat".
+    const char *label = name ? name + 1 : path;
     ftpd_log("Receiving %s", label);
     ftpd_reply(s, "150 Ready to receive.");
     int data = ftpd_open_data(s);
@@ -522,7 +523,7 @@ static void ftpd_cmd_stor(struct ftpd_session *s, const char *arg)
     {
         fclose(file);
         unlink(temp_path);
-        ftpd_log_update("Could not receive %s (no data connection)", label);
+        ftpd_log_update("Failed: %s (no connection)", label);
         return;
     }
 
@@ -560,7 +561,7 @@ static void ftpd_cmd_stor(struct ftpd_session *s, const char *arg)
     if (!ok)
     {
         unlink(temp_path);
-        ftpd_log_update("Could not receive %s (connection lost or SD full)", label);
+        ftpd_log_update("Failed: %s (lost connection or SD full)", label);
         ftpd_reply(s, "451 Transfer failed (lost connection, or the SD card is full).");
         return;
     }
@@ -570,12 +571,13 @@ static void ftpd_cmd_stor(struct ftpd_session *s, const char *arg)
     if (rename(temp_path, path) != 0)
     {
         // Keep the complete copy rather than lose both.
-        ftpd_log_update("Received %s, but could not rename it", label);
+        ftpd_log_update("Failed: %s (could not rename)", label);
         ftpd_reply(s, "451 Received, but could not rename it from %s.wwsync.", name ? name + 1 : path);
         return;
     }
 
     (*s->files_received)++;
+    s->session_received++;
     char size[24];
     ftpd_size_text(size, sizeof(size), total);
     ftpd_log_update("Received %s (%s)", label, size);
@@ -595,14 +597,15 @@ static void ftpd_cmd_retr(struct ftpd_session *s, const char *arg)
         return;
     }
 
-    const char *label = path + 4;
+    const char *slash = strrchr(path, '/');
+    const char *label = slash ? slash + 1 : path;
     ftpd_log("Sending %s", label);
     ftpd_reply(s, "150 Sending the file.");
     int data = ftpd_open_data(s);
     if (data < 0)
     {
         fclose(file);
-        ftpd_log_update("Could not send %s (no data connection)", label);
+        ftpd_log_update("Failed: %s (no connection)", label);
         return;
     }
 
@@ -630,7 +633,7 @@ static void ftpd_cmd_retr(struct ftpd_session *s, const char *arg)
         ftpd_show_totals(s);
     }
     else
-        ftpd_log_update("Could not send %s (connection lost)", label);
+        ftpd_log_update("Failed: %s (lost connection)", label);
     ftpd_reply(s, ok ? "226 File sent." : "426 Connection lost.");
 }
 
@@ -904,7 +907,7 @@ static void ftpd_nand_retr(struct ftpd_session *s, const char *nand_path, const 
     if (data < 0)
     {
         free(file);
-        ftpd_log_update("Could not send %s (no data connection)", label);
+        ftpd_log_update("Failed: %s (no connection)", label);
         return;
     }
     bool ok = ftpd_send_all(data, (const char *)file, len) == 0;
@@ -920,7 +923,7 @@ static void ftpd_nand_retr(struct ftpd_session *s, const char *nand_path, const 
         ftpd_show_totals(s);
     }
     else
-        ftpd_log_update("Could not send %s (connection lost)", label);
+        ftpd_log_update("Failed: %s (lost connection)", label);
     ftpd_reply(s, ok ? "226 File sent." : "426 Connection lost.");
 }
 
@@ -960,11 +963,11 @@ static int ftpd_nand_receive(struct ftpd_session *s)
 
 static void ftpd_nand_stor_rating(struct ftpd_session *s)
 {
-    ftpd_log("Receiving the VR rating");
+    ftpd_log("Receiving VR rating");
     int len = ftpd_nand_receive(s);
     if (len < 0)
     {
-        ftpd_log_update("The VR rating did not arrive in full, nothing changed");
+        ftpd_log_update("Failed: VR rating (lost connection)");
         if (len == -1)
             ftpd_reply(s, "451 The VR file did not arrive in full, so nothing was changed.");
         return;
@@ -973,13 +976,14 @@ static void ftpd_nand_stor_rating(struct ftpd_session *s)
     s32 res = ftpd_nand_write_rating(s->buffer, len);
     if (res < 0)
     {
-        ftpd_log_update("Could not save the VR rating (error %d)", (int)res);
+        ftpd_log_update("Failed: VR rating (error %d)", (int)res);
         ftpd_reply(s, "451 Could not write the VR file to the Wii's memory (error %d).", (int)res);
         return;
     }
 
     (*s->files_received)++;
-    ftpd_log_update("VR rating saved to the Wii's memory");
+    s->session_received++;
+    ftpd_log_update("Received VR rating");
     ftpd_show_totals(s);
     ftpd_reply(s, "226 File received.");
 }
@@ -998,7 +1002,7 @@ static void ftpd_nand_stor_ghost(struct ftpd_session *s, const char *nand_path, 
     int len = ftpd_nand_receive(s);
     if (len < 0)
     {
-        ftpd_log_update("%s did not arrive in full", label);
+        ftpd_log_update("Failed: %s (lost connection)", label);
         if (len == -1)
             ftpd_reply(s, "451 The ghost did not arrive in full, so nothing was changed.");
         return;
@@ -1008,12 +1012,13 @@ static void ftpd_nand_stor_ghost(struct ftpd_session *s, const char *nand_path, 
     if (res < 0)
     {
         ISFS_Delete(nand_path);
-        ftpd_log_update("Could not save %s (error %d)", label, (int)res);
+        ftpd_log_update("Failed: %s (error %d)", label, (int)res);
         ftpd_reply(s, "451 Could not write the ghost to the Wii's memory (error %d).", (int)res);
         return;
     }
 
     (*s->files_received)++;
+    s->session_received++;
     char size_text[24];
     ftpd_size_text(size_text, sizeof(size_text), len);
     ftpd_log_update("Received %s (%s)", label, size_text);
@@ -1035,8 +1040,13 @@ static bool ftpd_handle_nand(struct ftpd_session *s, const char *cmd, const char
     char nand_path[ISFS_MAXPATH];
     bool ghost = ftpd_nand_ghost_path(ftp_path, nand_path, sizeof(nand_path));
     bool ghosts_root = strcasecmp(ftp_path, FTPD_NAND_DIR "/" FTPD_NAND_GHOSTS_NAME) == 0;
-    // Shown on the Wii's screen, e.g. "Ghosts/42ef53cc/150/2m24s871.rkg".
-    const char *label = root ? ftp_path : ftp_path + strlen(FTPD_NAND_DIR) + 1;
+    // Shown on the Wii's screen: "ghost 2m24s871.rkg" or "leaderboard".
+    const char *file_name = strrchr(ftp_path, '/') + 1;
+    char label[32];
+    if (strcasecmp(file_name, "ldb.pul") == 0)
+        snprintf(label, sizeof(label), "leaderboard");
+    else
+        snprintf(label, sizeof(label), "ghost %s", file_name);
     u32 size = 0;
     int kind = ghost ? ftpd_nand_stat(nand_path, &size) : 0;
 
@@ -1057,7 +1067,7 @@ static bool ftpd_handle_nand(struct ftpd_session *s, const char *cmd, const char
             ftpd_reply(s, "550 No such file.");
     }
     else if (strcmp(cmd, "RETR") == 0 && rating)
-        ftpd_nand_retr(s, FTPD_NAND_RATING_PATH, "the VR rating");
+        ftpd_nand_retr(s, FTPD_NAND_RATING_PATH, "VR rating");
     else if (strcmp(cmd, "RETR") == 0 && kind == 1)
         ftpd_nand_retr(s, nand_path, label);
     else if (strcmp(cmd, "STOR") == 0 && rating)
@@ -1115,6 +1125,7 @@ static void ftpd_handle(struct ftpd_session *s, char *line)
         {
             s->logged_in = true;
             s->session_sent = 0;
+            s->session_received = 0;
         }
         ftpd_reply(s, "331 Any password works.");
     }
@@ -1167,10 +1178,7 @@ static void ftpd_handle(struct ftpd_session *s, char *line)
         ftpd_resolve(s, arg, ftp_path);
         ftpd_to_sd(ftp_path, path);
         if (mkdir(path, 0777) == 0)
-        {
-            ftpd_log("Made folder %s", ftp_path + 1);
             ftpd_reply(s, "257 \"%s\" created.", ftp_path);
-        }
         else
             ftpd_reply(s, "550 Could not create the directory.");
     }
@@ -1178,14 +1186,16 @@ static void ftpd_handle(struct ftpd_session *s, char *line)
     {
         ftpd_resolve_sd(s, arg, path);
         bool deleted = unlink(path) == 0;
-        ftpd_log(deleted ? "Deleted %s" : "Could not delete %s", path + 4);
+        const char *deleted_name = strrchr(path, '/');
+        ftpd_log(deleted ? "Removed %s" : "Failed: remove %s", deleted_name ? deleted_name + 1 : path);
         ftpd_reply(s, deleted ? "250 Deleted." : "550 Could not delete the file.");
     }
     else if ((strcmp(line, "RMD") == 0 || strcmp(line, "XRMD") == 0) && arg != NULL)
     {
         ftpd_resolve_sd(s, arg, path);
         bool removed = rmdir(path) == 0;
-        ftpd_log(removed ? "Removed folder %s" : "Could not remove folder %s", path + 4);
+        if (!removed)
+            ftpd_log("Failed: remove folder %s", path + 4);
         ftpd_reply(s, removed ? "250 Removed." : "550 Could not remove the directory.");
     }
     else if (strcmp(line, "ABOR") == 0)
@@ -1256,13 +1266,13 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
     ISFS_Initialize();
 
     char address[64];
-    snprintf(address, sizeof(address), "Wi-Fi sync is on: %s", inet_ntoa(ip));
+    snprintf(address, sizeof(address), "Wi-Fi sync: %s", inet_ntoa(ip));
     rrc_con_clear(true);
     rrc_con_print_text_centered(FTPD_HEADER_ROW, address);
-    rrc_con_print_text_centered(FTPD_HEADER_ROW + 1, "In Wheel Wizard+: Settings > Sync to Wii");
-    rrc_con_print_text_centered(FTPD_HEADER_ROW + 2, "A: copy save, VR and ghosts to PC   B: done");
+    rrc_con_print_text_centered(FTPD_HEADER_ROW + 1, "Enter this in Wheel Wizard+ > Sync to Wii");
+    rrc_con_print_text_centered(FTPD_HEADER_ROW + 2, "A: copy to PC   B: exit");
     ftpd_show_free_space();
-    ftpd_show(FTPD_CONNECTION_ROW, "Waiting for Wheel Wizard+...");
+    ftpd_show(FTPD_CONNECTION_ROW, "Not connected");
     ftpd_show_totals(&s);
     ftpd_log_count = 0;
     // The greeting tells Wheel Wizard+ the pack version, so it can show it without logging in.
@@ -1270,7 +1280,7 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
     struct rrc_version pack_version;
     if (!rrc_result_is_error(rrc_update_get_current_version(&pack_version)))
         snprintf(version, sizeof(version), " RR %d.%d.%d.", pack_version.major, pack_version.minor, pack_version.patch);
-    ftpd_log("Wi-Fi sync started");
+    ftpd_log("Waiting for Wheel Wizard+");
 
     while (1)
     {
@@ -1281,8 +1291,8 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
         if (s.present && s.control < 0 && time(NULL) - s.last_contact > FTPD_PRESENCE_SECONDS)
         {
             s.present = false;
-            ftpd_show(FTPD_CONNECTION_ROW, "Waiting for Wheel Wizard+...");
-            ftpd_log("Wheel Wizard+ disconnected");
+            ftpd_show(FTPD_CONNECTION_ROW, "Not connected");
+            ftpd_log("Disconnected");
         }
 
         // Wheel Wizard+ checks the Wii every few seconds, sees the request in the greeting, and copies them.
@@ -1290,7 +1300,7 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
         {
             // Pressing it again takes the request back, so it can be asked again.
             s.copy_requested = !s.copy_requested;
-            ftpd_log(s.copy_requested ? "Asked Wheel Wizard+ to copy the save, VR and ghosts" : "Copy to PC cancelled");
+            ftpd_log(s.copy_requested ? "Copy to PC asked (save, VR, ghosts)" : "Copy to PC cancelled");
         }
 
         struct pollfd pfd = {.fd = s.control >= 0 ? s.control : server, .events = POLLIN};
@@ -1313,8 +1323,8 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
                 if (!s.present)
                 {
                     s.present = true;
-                    ftpd_show(FTPD_CONNECTION_ROW, "Wheel Wizard+ connected (%s)", s.peer);
-                    ftpd_log("Wheel Wizard+ connected from %s", s.peer);
+                    ftpd_show(FTPD_CONNECTION_ROW, "Connected to Wheel Wizard+ (%s)", s.peer);
+                    ftpd_log("Connected to Wheel Wizard+");
                 }
                 ftpd_reply(&s, "220 Retro Rewind Wi-Fi sync ready.%s%s", version, s.copy_requested ? " " FTPD_COPY_REQUEST : "");
             }
@@ -1327,6 +1337,8 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
             s.last_contact = time(NULL);
             if (s.logged_in)
             {
+                if (s.session_received + s.session_sent > 0)
+                    ftpd_log("Sync done: %d received, %d sent", s.session_received, s.session_sent);
                 ftpd_show_free_space();
                 if (!rrc_result_is_error(rrc_update_get_current_version(&pack_version)))
                     snprintf(version, sizeof(version), " RR %d.%d.%d.", pack_version.major, pack_version.minor, pack_version.patch);
