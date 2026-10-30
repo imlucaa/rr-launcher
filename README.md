@@ -1,5 +1,13 @@
 # Retro Rewind Launcher
 
+> **About this fork:** this is [Retro-Rewind-Team/rr-launcher](https://github.com/Retro-Rewind-Team/rr-launcher) with one addition, **Wi-Fi sync** in the settings menu.
+> It starts a small FTP server for the SD card, so [Wheel Wizard+](https://github.com/imlucaa/WheelWizardPlus) (Settings > Sync to Wii) can send the Retro Rewind pack, patches and saves without taking the SD card out.
+>
+> **Install:** download `rr-launcher.zip` from [Releases](https://github.com/imlucaa/rr-launcher/releases) and unzip it to the root of the SD card, then start *Retro Rewind* from the Homebrew Channel.
+> **Use:** press B for settings, pick *Wi-Fi sync (Wheel Wizard+)*, and enter the address it shows in Wheel Wizard+. Press B when done.
+>
+> Builds come from GitHub Actions in `devkitpro/devkitppc:20251231`. Newer images ship libogc 3, which no longer has the `gettime`/`diff_msec` that this code and the prebuilt wii-mbedtls use.
+
 ![Sample](./assets/sample.png "Sample")
 
 This is an experimental channel for Wii, Wii U and Dolphin to launch and manage the Retro Rewind Mario Kart Wii distribution. \
