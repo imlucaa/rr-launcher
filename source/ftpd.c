@@ -140,6 +140,16 @@ static void ftpd_status(const char *fmt, ...)
     va_start(args, fmt);
     vsnprintf(msg, sizeof(msg), fmt, args);
     va_end(args);
+
+    // A line wider than the screen wraps onto the rows below, so long text (file names) keeps only its end.
+    int max = rrc_con_get_cols() - 2;
+    int len = strlen(msg);
+    if (max >= 4 && len > max)
+    {
+        memmove(msg + 3, msg + len - (max - 3), max - 3 + 1);
+        memcpy(msg, "...", 3);
+    }
+
     rrc_con_clear_line(FTPD_STATUS_ROW);
     rrc_con_print_text_centered(FTPD_STATUS_ROW, msg);
 }
@@ -880,7 +890,7 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
     snprintf(address, sizeof(address), "Wi-Fi sync is on: %s", inet_ntoa(ip));
     rrc_con_clear(true);
     rrc_con_print_text_centered(_RRC_ACTION_ROW, address);
-    rrc_con_print_text_centered(_RRC_ACTION_ROW + 1, "In Wheel Wizard+, open Settings > Sync to Wii and enter this address.");
+    rrc_con_print_text_centered(_RRC_ACTION_ROW + 1, "In Wheel Wizard+: Settings > Sync to Wii");
     rrc_con_print_text_centered(_RRC_ACTION_ROW + 2, "Press B when you are done.");
     ftpd_status("Waiting for Wheel Wizard+...");
 
