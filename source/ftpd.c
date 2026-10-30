@@ -45,6 +45,9 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <gccore.h>
+#include <ogc/isfs.h>
+#include <malloc.h>
+#include <dir.h>
 
 #define FTPD_PORT 21
 #define FTPD_PASV_PORT_FIRST 50000
@@ -58,6 +61,13 @@
 /* A transfer that makes no progress for this long is dropped, so a lost connection can't freeze the Wii. */
 #define FTPD_IO_TIMEOUT_MS 30000
 #define FTPD_POLL_MS 50
+
+#define FTPD_NAND_DIR "/_nand"
+#define FTPD_NAND_RATING_NAME "RRRating.pul"
+/* Where Pulsar keeps Retro Rewind's VR and BR ratings. */
+#define FTPD_NAND_RATING_PATH "/shared2/Pulsar/RetroRewind6/RRRating.pul"
+#define FTPD_RATING_BACKUP "sd:/" RRC_RETRO_REWIND_CHANNEL_DIR "/RRRating.pul.bak"
+#define FTPD_RATING_MAX FTPD_BUFFER_SIZE
 
 #define FTPD_STATUS_ROW (_RRC_ACTION_ROW + 4)
 
@@ -333,6 +343,16 @@ static void ftpd_cmd_list(struct ftpd_session *s, const char *arg, bool names_on
         }
         if (dir != NULL)
             closedir(dir);
+
+        // The card's root also shows the virtual folder that holds the VR rating file from NAND.
+        if (ok && strcmp(path, "sd:/") == 0)
+        {
+            if (names_only)
+                snprintf(entry, sizeof(entry), "%s\r\n", FTPD_NAND_DIR + 1);
+            else
+                snprintf(entry, sizeof(entry), "drwxr-xr-x 1 wii wii 0 Jan 01  2000 %s\r\n", FTPD_NAND_DIR + 1);
+            ok = ftpd_send_all(data, entry, strlen(entry)) == 0;
+        }
     }
 
     close(data);
@@ -456,6 +476,249 @@ static void ftpd_cmd_retr(struct ftpd_session *s, const char *arg)
     ftpd_reply(s, ok ? "226 File sent." : "426 Connection lost.");
 }
 
+/*
+    The VR rating file lives in the Wii's internal memory (NAND), not on the SD card. It is shown as the only file in a
+    virtual "/_nand" folder so Wheel Wizard+ can send and fetch it. Nothing else in NAND is reachable.
+*/
+
+static const char *ftpd_skip_list_flags(const char *arg)
+{
+    while (arg != NULL && arg[0] == '-')
+    {
+        const char *space = strchr(arg, ' ');
+        arg = space ? space + 1 : NULL;
+    }
+    return arg;
+}
+
+static bool ftpd_is_nand_dir(const char *ftp_path)
+{
+    return strcasecmp(ftp_path, FTPD_NAND_DIR) == 0;
+}
+
+static bool ftpd_is_nand_rating(const char *ftp_path)
+{
+    return strcasecmp(ftp_path, FTPD_NAND_DIR "/" FTPD_NAND_RATING_NAME) == 0;
+}
+
+/* Reads the rating file from NAND into a new 32-byte aligned buffer. Returns its length, or a negative ISFS error. */
+static s32 ftpd_nand_read_rating(u8 **out)
+{
+    *out = NULL;
+    s32 fd = ISFS_Open(FTPD_NAND_RATING_PATH, ISFS_OPEN_READ);
+    if (fd < 0)
+        return fd;
+
+    fstats stats __attribute__((aligned(32)));
+    s32 res = ISFS_GetFileStats(fd, &stats);
+    if (res >= 0 && (stats.file_length == 0 || stats.file_length > FTPD_RATING_MAX))
+        res = ISFS_EINVAL;
+    if (res >= 0)
+    {
+        *out = memalign(32, align_up(stats.file_length, 32));
+        res = *out == NULL ? ISFS_ENOMEM : ISFS_Read(fd, *out, stats.file_length);
+        if (res >= 0 && res != (s32)stats.file_length)
+            res = ISFS_EINVAL;
+    }
+    ISFS_Close(fd);
+
+    if (res < 0)
+    {
+        free(*out);
+        *out = NULL;
+        return res;
+    }
+    return stats.file_length;
+}
+
+/* Replaces the rating file in NAND. The old one is copied to the SD card first. */
+static s32 ftpd_nand_write_rating(const char *data, u32 len)
+{
+    u8 *old = NULL;
+    s32 old_len = ftpd_nand_read_rating(&old);
+    if (old_len > 0)
+    {
+        FILE *backup = fopen(FTPD_RATING_BACKUP, "wb");
+        bool backed_up = backup != NULL && fwrite(old, 1, old_len, backup) == (size_t)old_len;
+        if (backup != NULL && fclose(backup) != 0)
+            backed_up = false;
+        free(old);
+        if (!backed_up)
+            return ISFS_EINVAL;
+    }
+
+    u8 *buffer = memalign(32, align_up(len, 32));
+    if (buffer == NULL)
+        return ISFS_ENOMEM;
+    memcpy(buffer, data, len);
+
+    // Same size: overwrite in place, which keeps the file's owner and permissions as the game set them.
+    // Otherwise recreate it readable and writable by everyone, so the game can still update it.
+    if (old_len != (s32)len)
+    {
+        ISFS_Delete(FTPD_NAND_RATING_PATH);
+        ISFS_CreateDir("/shared2/Pulsar", 0, 3, 3, 3);
+        ISFS_CreateDir("/shared2/Pulsar/RetroRewind6", 0, 3, 3, 3);
+        s32 created = ISFS_CreateFile(FTPD_NAND_RATING_PATH, 0, 3, 3, 3);
+        if (created < 0)
+        {
+            free(buffer);
+            return created;
+        }
+    }
+
+    s32 fd = ISFS_Open(FTPD_NAND_RATING_PATH, ISFS_OPEN_WRITE);
+    s32 res = fd;
+    if (fd >= 0)
+    {
+        res = ISFS_Write(fd, buffer, len);
+        ISFS_Close(fd);
+    }
+    free(buffer);
+    return res < 0 ? res : (res == (s32)len ? 0 : ISFS_EINVAL);
+}
+
+static void ftpd_nand_list(struct ftpd_session *s, bool names_only)
+{
+    u8 *rating = NULL;
+    s32 len = ftpd_nand_read_rating(&rating);
+    free(rating);
+
+    ftpd_reply(s, "150 Here comes the listing.");
+    int data = ftpd_open_data(s);
+    if (data < 0)
+        return;
+
+    bool ok = true;
+    if (len > 0)
+    {
+        char entry[128];
+        if (names_only)
+            snprintf(entry, sizeof(entry), "%s\r\n", FTPD_NAND_RATING_NAME);
+        else
+            snprintf(entry, sizeof(entry), "-rw-r--r-- 1 wii wii %d Jan 01  2000 %s\r\n", (int)len, FTPD_NAND_RATING_NAME);
+        ok = ftpd_send_all(data, entry, strlen(entry)) == 0;
+    }
+    close(data);
+    ftpd_reply(s, ok ? "226 Listing done." : "426 Connection lost.");
+}
+
+static void ftpd_nand_retr(struct ftpd_session *s)
+{
+    u8 *rating = NULL;
+    s32 len = ftpd_nand_read_rating(&rating);
+    if (len <= 0)
+    {
+        ftpd_close_pasv(s);
+        ftpd_reply(s, "550 There is no VR rating file on this Wii yet.");
+        return;
+    }
+
+    ftpd_reply(s, "150 Sending the file.");
+    int data = ftpd_open_data(s);
+    if (data < 0)
+    {
+        free(rating);
+        return;
+    }
+    bool ok = ftpd_send_all(data, (const char *)rating, len) == 0;
+    free(rating);
+    close(data);
+    ftpd_reply(s, ok ? "226 File sent." : "426 Connection lost.");
+}
+
+static void ftpd_nand_stor(struct ftpd_session *s)
+{
+    ftpd_reply(s, "150 Ready to receive.");
+    int data = ftpd_open_data(s);
+    if (data < 0)
+        return;
+
+    // The rating file is small, so it is received whole before anything in NAND is touched.
+    int filled = 0;
+    bool ok = true;
+    while (1)
+    {
+        if (filled >= FTPD_BUFFER_SIZE)
+        {
+            ok = false;
+            break;
+        }
+        int received = ftpd_recv(data, s->buffer + filled, FTPD_BUFFER_SIZE - filled);
+        if (received == 0)
+            break;
+        if (received < 0)
+        {
+            ok = false;
+            break;
+        }
+        filled += received;
+    }
+    close(data);
+
+    if (!ok || filled == 0)
+    {
+        ftpd_reply(s, "451 The VR file did not arrive in full, so nothing was changed.");
+        return;
+    }
+
+    ftpd_status("Writing VR rating to the Wii's memory");
+    s32 res = ftpd_nand_write_rating(s->buffer, filled);
+    if (res < 0)
+    {
+        ftpd_reply(s, "451 Could not write the VR file to the Wii's memory (error %d).", (int)res);
+        return;
+    }
+
+    (*s->files_received)++;
+    ftpd_status("%d files received", *s->files_received);
+    ftpd_reply(s, "226 File received.");
+}
+
+/* Handles commands that touch "/_nand". Returns false for everything else. */
+static bool ftpd_handle_nand(struct ftpd_session *s, const char *cmd, const char *arg)
+{
+    bool is_list = strcmp(cmd, "LIST") == 0 || strcmp(cmd, "NLST") == 0;
+    char ftp_path[FTPD_PATH_MAX];
+    ftpd_resolve(s, is_list ? ftpd_skip_list_flags(arg) : arg, ftp_path);
+    bool dir = ftpd_is_nand_dir(ftp_path);
+    bool rating = ftpd_is_nand_rating(ftp_path);
+    if (!dir && !rating && strncasecmp(ftp_path, FTPD_NAND_DIR "/", strlen(FTPD_NAND_DIR) + 1) != 0)
+        return false;
+
+    if (strcmp(cmd, "CWD") == 0 && dir)
+    {
+        strcpy(s->cwd, FTPD_NAND_DIR);
+        ftpd_reply(s, "250 Directory changed.");
+    }
+    else if (is_list && dir)
+        ftpd_nand_list(s, strcmp(cmd, "NLST") == 0);
+    else if (strcmp(cmd, "SIZE") == 0 && rating)
+    {
+        u8 *buffer = NULL;
+        s32 len = ftpd_nand_read_rating(&buffer);
+        free(buffer);
+        if (len > 0)
+            ftpd_reply(s, "213 %d", (int)len);
+        else
+            ftpd_reply(s, "550 No such file.");
+    }
+    else if (strcmp(cmd, "RETR") == 0 && rating)
+        ftpd_nand_retr(s);
+    else if (strcmp(cmd, "STOR") == 0 && rating)
+        ftpd_nand_stor(s);
+    else if (strcmp(cmd, "CWD") == 0 || strcmp(cmd, "SIZE") == 0 || strcmp(cmd, "RETR") == 0 || strcmp(cmd, "STOR") == 0 ||
+             strcmp(cmd, "LIST") == 0 || strcmp(cmd, "NLST") == 0 || strcmp(cmd, "MKD") == 0 || strcmp(cmd, "XMKD") == 0 ||
+             strcmp(cmd, "DELE") == 0 || strcmp(cmd, "RMD") == 0 || strcmp(cmd, "XRMD") == 0)
+    {
+        ftpd_close_pasv(s);
+        ftpd_reply(s, "550 Only " FTPD_NAND_RATING_NAME " is available here.");
+    }
+    else
+        return false;
+    return true;
+}
+
 static void ftpd_handle(struct ftpd_session *s, char *line)
 {
     char *arg = strchr(line, ' ');
@@ -469,6 +732,9 @@ static void ftpd_handle(struct ftpd_session *s, char *line)
     }
     for (char *c = line; *c; c++)
         *c = toupper((unsigned char)*c);
+
+    if (ftpd_handle_nand(s, line, arg))
+        return;
 
     char path[FTPD_PATH_MAX + 4];
     struct stat st;
@@ -602,6 +868,9 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
         return rrc_result_create_error_errno(ENOMEM, "Could not start the sync server");
     }
 
+    // Needed only for the VR rating file; if it fails, that file just reports an error.
+    ISFS_Initialize();
+
     char address[64];
     snprintf(address, sizeof(address), "Wi-Fi sync is on: %s", inet_ntoa(ip));
     rrc_con_clear(true);
@@ -649,5 +918,6 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
         close(s.control);
     close(server);
     free(s.buffer);
+    ISFS_Deinitialize();
     return rrc_result_success;
 }
