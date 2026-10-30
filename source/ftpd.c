@@ -27,7 +27,6 @@
 #include "pad.h"
 #include "shutdown.h"
 #include "util.h"
-#include "sd.h"
 #include "update/update.h"
 #include <wiisocket.h>
 #include <sys/socket.h>
@@ -87,14 +86,28 @@
     the latest events (connections, each file received or sent, errors).
 */
 #define FTPD_HEADER_ROW 1
-#define FTPD_SD_ROW 4
-#define FTPD_CONNECTION_ROW 5
-#define FTPD_TOTALS_ROW 6
-#define FTPD_LOG_ROW 8
-#define FTPD_LOG_LINES 8
+#define FTPD_CONNECTION_ROW 2
+#define FTPD_MENU_ROW 4
+#define FTPD_HELP_ROW 10
+#define FTPD_LOG_ROW 11
+#define FTPD_LOG_LINES 5
 #define FTPD_LOG_WIDTH 96
-/* Added to the greeting while the player asked (A button) for the save and VR to be copied to the PC. */
-#define FTPD_COPY_REQUEST "Copy to PC requested."
+/*
+    What the player can ask Wheel Wizard+ for from this screen. Wheel Wizard+ checks the Wii every few seconds, reads
+    the request in the greeting ("Request 3: save.") and does it. The number tells a new request from the same one again.
+*/
+static const struct
+{
+    const char *label;
+    const char *request;
+} ftpd_menu[] = {
+    {"rksys.dat", "save"},
+    {"VR rating", "vr"},
+    {"Patches", "patches"},
+    {"Retro Rewind pack", "pack"},
+    {"Send rksys.dat and VR to PC", "to-pc"},
+};
+#define FTPD_MENU_COUNT ((int)(sizeof(ftpd_menu) / sizeof(ftpd_menu[0])))
 /*
     Wheel Wizard+ checks in every few seconds while its Sync to Wii page is open (connect, read the greeting, quit).
     It counts as connected until it hasn't checked in for this long.
@@ -117,7 +130,11 @@ struct ftpd_session
     /* Files sent during this connection; a finished copy to the PC clears the A button request. */
     int session_sent;
     int session_received;
-    bool copy_requested;
+    /* The menu item asked for (an index into ftpd_menu), or -1. A connection that logs in after it was asked for is
+       Wheel Wizard+ doing it, and clears it when it ends. */
+    int request;
+    int request_id;
+    bool session_after_request;
     bool logged_in;
     char peer[16];
     /* Whether Wheel Wizard+ is around (it checked in lately), and when it last did. */
@@ -194,11 +211,6 @@ static void ftpd_show(int row, const char *fmt, ...)
     rrc_con_print_text_centered(row, msg);
 }
 
-static void ftpd_show_totals(const struct ftpd_session *s)
-{
-    ftpd_show(FTPD_TOTALS_ROW, "Received %d   Sent %d", *s->files_received, s->files_sent);
-}
-
 static void ftpd_size_text(char *out, int out_size, unsigned long long bytes)
 {
     if (bytes >= 1024ULL * 1024 * 1024)
@@ -211,17 +223,18 @@ static void ftpd_size_text(char *out, int out_size, unsigned long long bytes)
         snprintf(out, out_size, "%llu bytes", bytes);
 }
 
-static void ftpd_show_free_space(void)
+static void ftpd_draw_menu(int selected, int pending)
 {
-    unsigned long long free_bytes = 0;
-    if (rrc_result_is_error(rrc_sd_get_free_space(&free_bytes)))
+    // Left-aligned in a centred column, so the arrow lines up.
+    int column = (rrc_con_get_cols() - 34) / 2;
+    for (int i = 0; i < FTPD_MENU_COUNT; i++)
     {
-        ftpd_show(FTPD_SD_ROW, "SD card: free space unknown");
-        return;
+        // The last item sends the other way, so a blank row sets it apart.
+        int row = FTPD_MENU_ROW + i + (i == FTPD_MENU_COUNT - 1 ? 1 : 0);
+        rrc_con_clear_line(row);
+        rrc_con_cursor_seek_to(row, column < 0 ? 0 : column);
+        printf("%s %s%s", i == selected ? ">" : " ", ftpd_menu[i].label, i == pending ? " ..." : "");
     }
-    char size[24];
-    ftpd_size_text(size, sizeof(size), free_bytes);
-    ftpd_show(FTPD_SD_ROW, "SD card: %s free", size);
 }
 
 static char ftpd_log_lines[FTPD_LOG_LINES][FTPD_LOG_WIDTH];
@@ -581,7 +594,6 @@ static void ftpd_cmd_stor(struct ftpd_session *s, const char *arg)
     char size[24];
     ftpd_size_text(size, sizeof(size), total);
     ftpd_log_update("Received %s (%s)", label, size);
-    ftpd_show_totals(s);
     ftpd_reply(s, "226 File received.");
 }
 
@@ -630,7 +642,6 @@ static void ftpd_cmd_retr(struct ftpd_session *s, const char *arg)
         char size[24];
         ftpd_size_text(size, sizeof(size), total);
         ftpd_log_update("Sent %s (%s)", label, size);
-        ftpd_show_totals(s);
     }
     else
         ftpd_log_update("Failed: %s (lost connection)", label);
@@ -920,7 +931,6 @@ static void ftpd_nand_retr(struct ftpd_session *s, const char *nand_path, const 
         char size[24];
         ftpd_size_text(size, sizeof(size), len);
         ftpd_log_update("Sent %s (%s)", label, size);
-        ftpd_show_totals(s);
     }
     else
         ftpd_log_update("Failed: %s (lost connection)", label);
@@ -984,7 +994,6 @@ static void ftpd_nand_stor_rating(struct ftpd_session *s)
     (*s->files_received)++;
     s->session_received++;
     ftpd_log_update("Received VR rating");
-    ftpd_show_totals(s);
     ftpd_reply(s, "226 File received.");
 }
 
@@ -1022,7 +1031,6 @@ static void ftpd_nand_stor_ghost(struct ftpd_session *s, const char *nand_path, 
     char size_text[24];
     ftpd_size_text(size_text, sizeof(size_text), len);
     ftpd_log_update("Received %s (%s)", label, size_text);
-    ftpd_show_totals(s);
     ftpd_reply(s, "226 File received.");
 }
 
@@ -1126,6 +1134,7 @@ static void ftpd_handle(struct ftpd_session *s, char *line)
             s->logged_in = true;
             s->session_sent = 0;
             s->session_received = 0;
+            s->session_after_request = s->request >= 0;
         }
         ftpd_reply(s, "331 Any password works.");
     }
@@ -1269,18 +1278,18 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
     snprintf(address, sizeof(address), "FTPD: %s", inet_ntoa(ip));
     rrc_con_clear(true);
     rrc_con_print_text_centered(FTPD_HEADER_ROW, address);
-    rrc_con_print_text_centered(FTPD_HEADER_ROW + 1, "Enter this in Wheel Wizard+ > Sync to Wii");
-    rrc_con_print_text_centered(FTPD_HEADER_ROW + 2, "A: send save and VR to PC   B: exit");
-    ftpd_show_free_space();
-    ftpd_show(FTPD_CONNECTION_ROW, "Not connected");
-    ftpd_show_totals(&s);
+    ftpd_show(FTPD_CONNECTION_ROW, "Not connected: enter this in Wheel Wizard+");
+    int selected = 0;
+    s.request = -1;
+    ftpd_draw_menu(selected, s.request);
+    rrc_con_print_text_centered(FTPD_MENU_ROW - 1, "Get from Wheel Wizard+:");
+    rrc_con_print_text_centered(FTPD_HELP_ROW, "A: start   B: exit");
     ftpd_log_count = 0;
     // The greeting tells Wheel Wizard+ the pack version, so it can show it without logging in.
     char version[32] = "";
     struct rrc_version pack_version;
     if (!rrc_result_is_error(rrc_update_get_current_version(&pack_version)))
         snprintf(version, sizeof(version), " RR %d.%d.%d.", pack_version.major, pack_version.minor, pack_version.patch);
-    ftpd_log("Waiting for Wheel Wizard+");
 
     while (1)
     {
@@ -1291,16 +1300,29 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
         if (s.present && s.control < 0 && time(NULL) - s.last_contact > FTPD_PRESENCE_SECONDS)
         {
             s.present = false;
-            ftpd_show(FTPD_CONNECTION_ROW, "Not connected");
+            ftpd_show(FTPD_CONNECTION_ROW, "Not connected: enter this in Wheel Wizard+");
             ftpd_log("Disconnected");
         }
 
-        // Wheel Wizard+ checks the Wii every few seconds, sees the request in the greeting, and copies them.
+        if (rrc_pad_up_pressed(pad) && selected > 0)
+            ftpd_draw_menu(--selected, s.request);
+        if (rrc_pad_down_pressed(pad) && selected < FTPD_MENU_COUNT - 1)
+            ftpd_draw_menu(++selected, s.request);
         if (rrc_pad_a_pressed(pad))
         {
-            // Pressing it again takes the request back, so it can be asked again.
-            s.copy_requested = !s.copy_requested;
-            ftpd_log(s.copy_requested ? "Sending save and VR to PC..." : "Cancelled");
+            // A on the item that is waiting takes it back.
+            if (s.request == selected)
+            {
+                s.request = -1;
+                ftpd_log("Cancelled");
+            }
+            else
+            {
+                s.request = selected;
+                s.request_id++;
+                ftpd_log(s.present ? "%s..." : "%s (open Sync to Wii in Wheel Wizard+)", ftpd_menu[selected].label);
+            }
+            ftpd_draw_menu(selected, s.request);
         }
 
         struct pollfd pfd = {.fd = s.control >= 0 ? s.control : server, .events = POLLIN};
@@ -1323,10 +1345,13 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
                 if (!s.present)
                 {
                     s.present = true;
-                    ftpd_show(FTPD_CONNECTION_ROW, "Connected to Wheel Wizard+ (%s)", s.peer);
+                    ftpd_show(FTPD_CONNECTION_ROW, "Connected to Wheel Wizard+");
                     ftpd_log("Connected to Wheel Wizard+");
                 }
-                ftpd_reply(&s, "220 Retro Rewind Wi-Fi sync ready.%s%s", version, s.copy_requested ? " " FTPD_COPY_REQUEST : "");
+                char request[48] = "";
+                if (s.request >= 0)
+                    snprintf(request, sizeof(request), " Request %d: %s.", s.request_id, ftpd_menu[s.request].request);
+                ftpd_reply(&s, "220 Retro Rewind Wi-Fi sync ready.%s%s", version, request);
             }
         }
         else if (!ftpd_read_commands(&s))
@@ -1338,14 +1363,13 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
             if (s.logged_in)
             {
                 if (s.session_received + s.session_sent > 0)
-                    ftpd_log("Sync done: %d received, %d sent", s.session_received, s.session_sent);
-                ftpd_show_free_space();
+                    ftpd_log("Done: %d received, %d sent", s.session_received, s.session_sent);
                 if (!rrc_result_is_error(rrc_update_get_current_version(&pack_version)))
                     snprintf(version, sizeof(version), " RR %d.%d.%d.", pack_version.major, pack_version.minor, pack_version.patch);
-                if (s.copy_requested && s.session_sent > 0)
+                if (s.request >= 0 && s.session_after_request)
                 {
-                    s.copy_requested = false;
-                    ftpd_log("Save and VR sent to PC");
+                    s.request = -1;
+                    ftpd_draw_menu(selected, s.request);
                 }
             }
         }
