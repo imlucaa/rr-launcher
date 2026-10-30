@@ -68,6 +68,8 @@
 #define FTPD_NAND_RATING_PATH "/shared2/Pulsar/RetroRewind6/RRRating.pul"
 #define FTPD_RATING_BACKUP "sd:/" RRC_RETRO_REWIND_CHANNEL_DIR "/RRRating.pul.bak"
 #define FTPD_RATING_MAX FTPD_BUFFER_SIZE
+/* IOS file system error for a file that does not exist. */
+#define FTPD_ISFS_ENOENT (-106)
 
 #define FTPD_STATUS_ROW (_RRC_ACTION_ROW + 4)
 
@@ -536,6 +538,9 @@ static s32 ftpd_nand_write_rating(const char *data, u32 len)
 {
     u8 *old = NULL;
     s32 old_len = ftpd_nand_read_rating(&old);
+    // A file that exists but can't be read would be lost without a backup, so leave it alone.
+    if (old_len < 0 && old_len != FTPD_ISFS_ENOENT)
+        return old_len;
     if (old_len > 0)
     {
         FILE *backup = fopen(FTPD_RATING_BACKUP, "wb");
