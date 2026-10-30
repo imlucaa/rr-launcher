@@ -52,7 +52,11 @@
 #define FTPD_PATH_MAX 768
 #define FTPD_LINE_MAX 1024
 #define FTPD_BUFFER_SIZE (64 * 1024)
+/* libwiisocket copies every send/recv buffer through its own 64KB heap, so socket calls must stay well below that. */
+#define FTPD_NET_CHUNK (8 * 1024)
 #define FTPD_DATA_TIMEOUT_MS 15000
+/* A transfer that makes no progress for this long is dropped, so a lost connection can't freeze the Wii. */
+#define FTPD_IO_TIMEOUT_MS 30000
 #define FTPD_POLL_MS 50
 
 #define FTPD_STATUS_ROW (_RRC_ACTION_ROW + 4)
@@ -72,17 +76,33 @@ struct ftpd_session
     bool quit;
 };
 
+static bool ftpd_wait(int fd, short events)
+{
+    struct pollfd pfd = {.fd = fd, .events = events};
+    return poll(&pfd, 1, FTPD_IO_TIMEOUT_MS) > 0;
+}
+
 static int ftpd_send_all(int fd, const char *data, int len)
 {
     while (len > 0)
     {
-        int sent = send(fd, data, len, 0);
+        if (!ftpd_wait(fd, POLLOUT))
+            return -1;
+        int sent = send(fd, data, len < FTPD_NET_CHUNK ? len : FTPD_NET_CHUNK, 0);
         if (sent <= 0)
             return -1;
         data += sent;
         len -= sent;
     }
     return 0;
+}
+
+/* Receives up to `len' bytes (at most one chunk). Returns 0 at the end of the stream and -1 on error or timeout. */
+static int ftpd_recv(int fd, char *buffer, int len)
+{
+    if (!ftpd_wait(fd, POLLIN))
+        return -1;
+    return recv(fd, buffer, len < FTPD_NET_CHUNK ? len : FTPD_NET_CHUNK, 0);
 }
 
 static void ftpd_reply(struct ftpd_session *s, const char *fmt, ...)
@@ -177,6 +197,10 @@ static int ftpd_listen_on(u16 port, int backlog)
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0)
         return -1;
+
+    // Lets Wi-Fi sync be reopened right after it was closed. Not every IOS supports it, so failure is ignored.
+    int reuse = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -318,11 +342,17 @@ static void ftpd_cmd_list(struct ftpd_session *s, const char *arg, bool names_on
         ftpd_reply(s, "426 Connection lost.");
 }
 
+/*
+    The file is written next to its destination first and only replaces it once it arrived in full, so a dropped
+    connection never leaves a half-written save or pack file behind.
+*/
 static void ftpd_cmd_stor(struct ftpd_session *s, const char *arg)
 {
     char path[FTPD_PATH_MAX + 4];
+    char temp_path[FTPD_PATH_MAX + 16];
     ftpd_resolve_sd(s, arg, path);
-    FILE *file = fopen(path, "wb");
+    snprintf(temp_path, sizeof(temp_path), "%s.wwsync", path);
+    FILE *file = fopen(temp_path, "wb");
     if (file == NULL)
     {
         ftpd_close_pasv(s);
@@ -337,37 +367,58 @@ static void ftpd_cmd_stor(struct ftpd_session *s, const char *arg)
     if (data < 0)
     {
         fclose(file);
+        unlink(temp_path);
         return;
     }
 
+    // Network reads are small, so collect a full buffer before each write to keep SD card writes large.
     bool ok = true;
-    while (1)
+    bool done = false;
+    while (ok && !done)
     {
-        int received = recv(data, s->buffer, FTPD_BUFFER_SIZE, 0);
-        if (received == 0)
-            break;
-        if (received < 0 || fwrite(s->buffer, 1, received, file) != (size_t)received)
+        int filled = 0;
+        while (filled < FTPD_BUFFER_SIZE)
         {
-            ok = false;
-            break;
+            int received = ftpd_recv(data, s->buffer + filled, FTPD_BUFFER_SIZE - filled);
+            if (received == 0)
+            {
+                done = true;
+                break;
+            }
+            if (received < 0)
+            {
+                ok = false;
+                break;
+            }
+            filled += received;
         }
+        if (ok && filled > 0 && fwrite(s->buffer, 1, filled, file) != (size_t)filled)
+            ok = false;
     }
     close(data);
 
     if (fclose(file) != 0)
         ok = false;
 
-    if (ok)
+    if (!ok)
     {
-        (*s->files_received)++;
-        ftpd_status("%d files received", *s->files_received);
-        ftpd_reply(s, "226 File received.");
+        unlink(temp_path);
+        ftpd_reply(s, "451 Transfer failed (lost connection, or the SD card is full).");
+        return;
     }
-    else
+
+    // FAT can't rename over an existing file, so the old one is removed first.
+    unlink(path);
+    if (rename(temp_path, path) != 0)
     {
-        unlink(path);
-        ftpd_reply(s, "451 Transfer failed (is the SD card full?).");
+        // Keep the complete copy rather than lose both.
+        ftpd_reply(s, "451 Received, but could not rename it from %s.wwsync.", name ? name + 1 : path);
+        return;
     }
+
+    (*s->files_received)++;
+    ftpd_status("%d files received", *s->files_received);
+    ftpd_reply(s, "226 File received.");
 }
 
 static void ftpd_cmd_retr(struct ftpd_session *s, const char *arg)
