@@ -35,3 +35,12 @@ jobs:
           docker exec retrorewind-ci make clean
           docker exec retrorewind-ci make
           docker stop retrorewind-ci
+
+      - name: Upload channel build
+        uses: actions/upload-artifact@v4
+        with:
+          name: rr-launcher-wifisync
+          path: |
+            *.dol
+            runtime-ext/*.dol
+          if-no-files-found: error

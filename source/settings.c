@@ -24,6 +24,7 @@
 #include "settingsfile.h"
 #include "update/update.h"
 #include "prompt.h"
+#include "ftpd.h"
 #include <riivo.h>
 #include <stdio.h>
 #include <string.h>
@@ -82,6 +83,8 @@ static char *autoupdate_label = "Automatic updates";
 static char *perform_updates_label = "Perform updates";
 
 static char *manage_channel_installation_label = "Manage channel installation";
+
+static char *wifi_sync_label = "Wi-Fi sync (Wheel Wizard+)";
 
 static char *exit_label = "Exit Channel";
 
@@ -198,6 +201,7 @@ enum rrc_settings_result rrc_settings_display(void *xfb, struct rrc_settingsfile
         {.type = ENTRY_TYPE_BUTTON, .label = launch_label},
         {.type = ENTRY_TYPE_BUTTON, .label = perform_updates_label, .margin_top = 1},
         {.type = ENTRY_TYPE_BUTTON, .label = manage_channel_installation_label, .margin_top = 1},
+        {.type = ENTRY_TYPE_BUTTON, .label = wifi_sync_label, .margin_top = 1},
         {.type = ENTRY_TYPE_SELECT,
          .label = my_stuff_label,
          .options = my_stuff_options,
@@ -416,7 +420,7 @@ enum rrc_settings_result rrc_settings_display(void *xfb, struct rrc_settingsfile
                 else if (entry->label == save_label)
                 {
                     // We'll set a status message in either ok/err case, so set up the position here.
-                    status_message_row = 11;
+                    status_message_row = 13;
                     status_message_col = strlen(cursor_icon) + strlen(save_label) + 3;
 
                     struct rrc_result res = rrc_settingsfile_store(stored_settings);
@@ -482,6 +486,26 @@ enum rrc_settings_result rrc_settings_display(void *xfb, struct rrc_settingsfile
                     strncpy(status_message, RRC_CON_ANSI_FG_BRIGHT_MAGENTA "Oops" RRC_CON_ANSI_CLR, sizeof(status_message));
                     status_message_row = 5;
                     status_message_col = strlen(cursor_icon) + strlen(manage_channel_installation_label) + 3;
+
+                    break;
+                }
+                else if (entry->label == wifi_sync_label)
+                {
+                    int files_received = 0;
+                    struct rrc_result sync_res = rrc_ftpd_run(xfb, &files_received);
+                    rrc_con_clear(true);
+
+                    if (rrc_result_is_error(sync_res))
+                    {
+                        rrc_result_error_check_error_normal(sync_res, xfb);
+                        rrc_con_clear(true);
+                    }
+                    else
+                    {
+                        snprintf(status_message, sizeof(status_message), RRC_CON_ANSI_FG_GREEN "%d files received." RRC_CON_ANSI_CLR, files_received);
+                        status_message_row = 7;
+                        status_message_col = strlen(cursor_icon) + strlen(wifi_sync_label) + 3;
+                    }
 
                     break;
                 }
