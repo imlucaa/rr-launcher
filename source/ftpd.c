@@ -28,6 +28,7 @@
 #include "shutdown.h"
 #include "util.h"
 #include "sd.h"
+#include "update/update.h"
 #include <wiisocket.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -94,6 +95,11 @@
 #define FTPD_LOG_WIDTH 96
 /* Added to the greeting while the player asked (A button) for the save, VR and ghosts to be copied to the PC. */
 #define FTPD_COPY_REQUEST "Copy to PC requested."
+/*
+    Wheel Wizard+ checks in every few seconds while its Sync to Wii page is open (connect, read the greeting, quit).
+    It counts as connected until it hasn't checked in for this long.
+*/
+#define FTPD_PRESENCE_SECONDS 12
 
 struct ftpd_session
 {
@@ -111,9 +117,11 @@ struct ftpd_session
     /* Files sent during this connection; a finished copy to the PC clears the A button request. */
     int session_sent;
     bool copy_requested;
-    /* Set once the client logs in, so a quick "is the Wii there?" check doesn't show as a connection. */
     bool logged_in;
     char peer[16];
+    /* Whether Wheel Wizard+ is around (it checked in lately), and when it last did. */
+    bool present;
+    time_t last_contact;
     bool quit;
 };
 
@@ -1107,8 +1115,6 @@ static void ftpd_handle(struct ftpd_session *s, char *line)
         {
             s->logged_in = true;
             s->session_sent = 0;
-            ftpd_show(FTPD_CONNECTION_ROW, "Wheel Wizard+ connected (%s)", s->peer);
-            ftpd_log("Wheel Wizard+ connected from %s", s->peer);
         }
         ftpd_reply(s, "331 Any password works.");
     }
@@ -1259,6 +1265,11 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
     ftpd_show(FTPD_CONNECTION_ROW, "Waiting for Wheel Wizard+...");
     ftpd_show_totals(&s);
     ftpd_log_count = 0;
+    // The greeting tells Wheel Wizard+ the pack version, so it can show it without logging in.
+    char version[32] = "";
+    struct rrc_version pack_version;
+    if (!rrc_result_is_error(rrc_update_get_current_version(&pack_version)))
+        snprintf(version, sizeof(version), " RR %d.%d.%d.", pack_version.major, pack_version.minor, pack_version.patch);
     ftpd_log("Wi-Fi sync started");
 
     while (1)
@@ -1267,6 +1278,13 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
         struct pad_state pad = rrc_pad_buttons();
         if (rrc_pad_b_pressed(pad) || rrc_pad_home_pressed(pad))
             break;
+        if (s.present && s.control < 0 && time(NULL) - s.last_contact > FTPD_PRESENCE_SECONDS)
+        {
+            s.present = false;
+            ftpd_show(FTPD_CONNECTION_ROW, "Waiting for Wheel Wizard+...");
+            ftpd_log("Wheel Wizard+ disconnected");
+        }
+
         // Wheel Wizard+ checks the Wii every few seconds, sees the request in the greeting, and copies them.
         if (rrc_pad_a_pressed(pad))
         {
@@ -1291,8 +1309,14 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
                 s.quit = false;
                 s.logged_in = false;
                 snprintf(s.peer, sizeof(s.peer), "%s", inet_ntoa(addr.sin_addr));
-                ftpd_reply(&s, s.copy_requested ? "220 Retro Rewind Wi-Fi sync ready. " FTPD_COPY_REQUEST
-                                                : "220 Retro Rewind Wi-Fi sync ready.");
+                s.last_contact = time(NULL);
+                if (!s.present)
+                {
+                    s.present = true;
+                    ftpd_show(FTPD_CONNECTION_ROW, "Wheel Wizard+ connected (%s)", s.peer);
+                    ftpd_log("Wheel Wizard+ connected from %s", s.peer);
+                }
+                ftpd_reply(&s, "220 Retro Rewind Wi-Fi sync ready.%s%s", version, s.copy_requested ? " " FTPD_COPY_REQUEST : "");
             }
         }
         else if (!ftpd_read_commands(&s))
@@ -1300,11 +1324,12 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
             ftpd_close_pasv(&s);
             close(s.control);
             s.control = -1;
+            s.last_contact = time(NULL);
             if (s.logged_in)
             {
-                ftpd_show(FTPD_CONNECTION_ROW, "Waiting for Wheel Wizard+...");
                 ftpd_show_free_space();
-                ftpd_log("Wheel Wizard+ disconnected");
+                if (!rrc_result_is_error(rrc_update_get_current_version(&pack_version)))
+                    snprintf(version, sizeof(version), " RR %d.%d.%d.", pack_version.major, pack_version.minor, pack_version.patch);
                 if (s.copy_requested && s.session_sent > 0)
                 {
                     s.copy_requested = false;
