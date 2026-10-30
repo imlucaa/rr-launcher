@@ -54,6 +54,7 @@
 #include "pad.h"
 #include "crash.h"
 #include "ephfile.h"
+#include "ftpd.h"
 
 /* 100ms */
 #define DISKCHECK_DELAY 100000
@@ -146,6 +147,35 @@ int main(int argc, char **argv)
     else
     {
         fclose(afd);
+    }
+
+    // Without the pack there is nothing to load or launch, and the settings menu needs its XML.
+    // Offer Wi-Fi sync first so Wheel Wizard+ can send it, before the disc or settings are needed.
+    if (!rrc_sd_file_exists(RRC_RIIVO_XML_PATH))
+    {
+        char *lines[] = {
+            "Retro Rewind is not on the SD card yet.",
+            "",
+            "Start Wi-Fi sync so Wheel Wizard+ can send it?"};
+        if (rrc_prompt_yes_no(xfb, lines, 3) != RRC_PROMPT_RESULT_YES)
+        {
+            exit(0);
+        }
+
+        int files_received;
+        struct rrc_result sync_res = rrc_ftpd_run(xfb, &files_received);
+        rrc_result_error_check_error_normal(sync_res, xfb);
+        rrc_con_clear(true);
+
+        if (!rrc_sd_file_exists(RRC_RIIVO_XML_PATH))
+        {
+            char *missing[] = {
+                "Retro Rewind is still not on the SD card.",
+                "",
+                "The launcher will now close."};
+            rrc_prompt_1_option(xfb, missing, 3, "OK");
+            exit(0);
+        }
     }
 
     rrc_con_update("Load settings", 5);

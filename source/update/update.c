@@ -155,6 +155,11 @@ int _rrc_zipdl_progress_callback(int *numinfo,
 #define _RRC_PROGRESS_UPD_CHUNKSIZE 100000
     /* update download speed every second */
 #define _RRC_PROGRESS_UPD_SPEED_INC 1000
+    // curl reports a total of 0 until it knows the size.
+    if (dltotal <= 0)
+    {
+        return 0;
+    }
     int progress = (dlnow * 100) / dltotal;
 
     if (diff_msec(last_measurement_from, gettime()) > _RRC_PROGRESS_UPD_SPEED_INC || last_measurement_from < 0)
@@ -245,6 +250,7 @@ CURLcode _rrc_update_get_zip_size(char *url, curl_off_t *size)
         cres = curl_easy_perform(curl);
         if (cres != CURLE_OK)
         {
+            curl_easy_cleanup(curl);
             return cres;
         }
         cres = curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, size);
@@ -393,7 +399,7 @@ struct rrc_result rrc_update_extract_zip_archive()
             return rrc_result_create_error_zip(err, "Failed to stat file in archive");
         }
 
-        if (!(stat.valid & (ZIP_STAT_SIZE | ZIP_STAT_NAME | ZIP_STAT_SIZE)))
+        if ((stat.valid & (ZIP_STAT_SIZE | ZIP_STAT_NAME)) != (ZIP_STAT_SIZE | ZIP_STAT_NAME))
         {
             return rrc_result_create_error_misc_update("ZIP Archive entry contains invalid attributes");
         }
@@ -527,7 +533,8 @@ struct rrc_result rrc_update_do_updates_with_state(struct rrc_update_state *stat
         unsigned long long sd_free;
         TRY(rrc_sd_get_free_space(&sd_free));
 
-        if (zipsz > sd_free) 
+        // zipsz is -1 when the server doesn't send a size; only compare a known size.
+        if (zipsz > 0 && (unsigned long long)zipsz > sd_free)
         {
             char msg[200];
             snprintf(msg, 200, "Not enough free space on SD card for update ZIP.\nNeeded: %llu bytes, available: %llu bytes", zipsz, sd_free);

@@ -154,9 +154,11 @@ _rrc_riivo_handle_file_patch(struct vec *sd_files,
         return;
     }
 
-    if (disc_path[0] == '.' && disc_path[1] == '_')
+    // Ignore AppleDouble files ("._name", left by macOS), including those inside patched folders.
+    const char *file_name = strrchr(disc_path, '/');
+    file_name = file_name ? file_name + 1 : disc_path;
+    if (file_name[0] == '.' && file_name[1] == '_')
     {
-        // Ignore AppleDouble files.
         return;
     }
 

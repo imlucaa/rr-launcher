@@ -167,7 +167,8 @@ int rrc_versionsfile_get_removed_files(char **result)
 int rrc_versionsfile_split_by(char *in, char by, char ***out, int *amt)
 {
     int len = strlen(in), i = 0, count = 0, current_len = 0, start_idx = 0;
-    *out = malloc(_RRC_SPLIT_LIM);
+    // Room for _RRC_SPLIT_LIM pointers (not bytes).
+    *out = malloc(_RRC_SPLIT_LIM * sizeof(char *));
     if (*out == NULL)
     {
         return -2;
@@ -177,6 +178,12 @@ int rrc_versionsfile_split_by(char *in, char by, char ***out, int *amt)
     {
         if (in[i] == by || i == (len - 1))
         {
+            /* the array is full: stop before writing past its end */
+            if (count >= _RRC_SPLIT_LIM)
+            {
+                return 2;
+            }
+
             /* handle last element */
             if (i == (len - 1) && in[i] != by)
             {
@@ -239,7 +246,7 @@ struct rrc_result rrc_versionsfile_get_necessary_urls_and_versions(char *version
         We parse each verstring, and if it yields a greater absolute value than our current version,
         we parse the url associated with it and add it to the list of updates.
     */
-    *urls = malloc(_RRC_SPLIT_LIM);
+    *urls = malloc(_RRC_SPLIT_LIM * sizeof(char *));
     *versions = malloc(_RRC_SPLIT_LIM * sizeof(struct rrc_version));
 
     char **lines;

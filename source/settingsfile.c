@@ -108,6 +108,8 @@ void rrc_settingsfile_init_defaults(struct rrc_settingsfile *settings)
     settings->auto_update = RRC_SETTINGSFILE_AUTOUPDATE_DEFAULT;
 }
 
+static struct rrc_result rrc_settingsfile_read_entries(FILE *file, struct rrc_settingsfile *settings);
+
 struct rrc_result rrc_settingsfile_parse(struct rrc_settingsfile *settings)
 {
     // Initialize it with defaults early so that it will always at least have valid values even in case of an error.
@@ -129,6 +131,14 @@ struct rrc_result rrc_settingsfile_parse(struct rrc_settingsfile *settings)
         return rrc_result_create_error_errno(errno, "failed to open file for reading after creating it");
     }
 
+    // Read in a helper so the file is closed on every error path too.
+    struct rrc_result res = rrc_settingsfile_read_entries(file, settings);
+    fclose(file);
+    return res;
+}
+
+static struct rrc_result rrc_settingsfile_read_entries(FILE *file, struct rrc_settingsfile *settings)
+{
     u32 magic;
     TRY(expect_read_u32(file, &magic, "Failed to read magic bytes"));
     if (magic != RRC_SETTINGSFILE_MAGIC)
@@ -192,7 +202,6 @@ struct rrc_result rrc_settingsfile_parse(struct rrc_settingsfile *settings)
         }
     }
 
-    fclose(file);
     return rrc_result_success;
 }
 
@@ -223,6 +232,15 @@ struct rrc_result rrc_settingsfile_set_option(FILE *file, const char *key, u32 v
     return rrc_result_success;
 }
 
+static struct rrc_result rrc_settingsfile_write_entries(FILE *file, struct rrc_settingsfile *settings)
+{
+    TRY(rrc_settingsfile_write_header(file, 3));
+    TRY(rrc_settingsfile_set_option(file, RRC_SETTINGSFILE_MY_STUFF_KEY, settings->my_stuff));
+    TRY(rrc_settingsfile_set_option(file, RRC_SETTINGSFILE_SAVEGAME_KEY, settings->separate_savegame));
+    TRY(rrc_settingsfile_set_option(file, RRC_SETTINGSFILE_AUTOUPDATE_KEY, settings->auto_update));
+    return rrc_result_success;
+}
+
 /**
  * Writes an `rrc_settingsfile` to the sd card.
  */
@@ -234,12 +252,10 @@ struct rrc_result rrc_settingsfile_store(struct rrc_settingsfile *settings)
         return rrc_result_create_error_errno(errno, "Failed to open settingsfile");
     }
 
-    rrc_settingsfile_write_header(file, 3);
-
-    TRY(rrc_settingsfile_set_option(file, RRC_SETTINGSFILE_MY_STUFF_KEY, settings->my_stuff));
-    TRY(rrc_settingsfile_set_option(file, RRC_SETTINGSFILE_SAVEGAME_KEY, settings->separate_savegame));
-    TRY(rrc_settingsfile_set_option(file, RRC_SETTINGSFILE_AUTOUPDATE_KEY, settings->auto_update));
-
-    fclose(file);
-    return rrc_result_success;
+    struct rrc_result res = rrc_settingsfile_write_entries(file, settings);
+    if (fclose(file) != 0 && !rrc_result_is_error(res))
+    {
+        res = rrc_result_create_error_errno(errno, "Failed to finish writing settingsfile");
+    }
+    return res;
 }
