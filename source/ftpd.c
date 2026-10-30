@@ -92,7 +92,7 @@
 #define FTPD_LOG_ROW 8
 #define FTPD_LOG_LINES 8
 #define FTPD_LOG_WIDTH 96
-/* Added to the greeting while the player asked (A button) for the save and VR to be copied to the PC. */
+/* Added to the greeting while the player asked (A button) for the save, VR and ghosts to be copied to the PC. */
 #define FTPD_COPY_REQUEST "Copy to PC requested."
 
 struct ftpd_session
@@ -1254,7 +1254,7 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
     rrc_con_clear(true);
     rrc_con_print_text_centered(FTPD_HEADER_ROW, address);
     rrc_con_print_text_centered(FTPD_HEADER_ROW + 1, "In Wheel Wizard+: Settings > Sync to Wii");
-    rrc_con_print_text_centered(FTPD_HEADER_ROW + 2, "A: send save and VR to PC   B: done");
+    rrc_con_print_text_centered(FTPD_HEADER_ROW + 2, "A: copy save, VR and ghosts to PC   B: done");
     ftpd_show_free_space();
     ftpd_show(FTPD_CONNECTION_ROW, "Waiting for Wheel Wizard+...");
     ftpd_show_totals(&s);
@@ -1268,10 +1268,11 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
         if (rrc_pad_b_pressed(pad) || rrc_pad_home_pressed(pad))
             break;
         // Wheel Wizard+ checks the Wii every few seconds, sees the request in the greeting, and copies them.
-        if (rrc_pad_a_pressed(pad) && !s.copy_requested)
+        if (rrc_pad_a_pressed(pad))
         {
-            s.copy_requested = true;
-            ftpd_log("Asked Wheel Wizard+ to copy the save and VR");
+            // Pressing it again takes the request back, so it can be asked again.
+            s.copy_requested = !s.copy_requested;
+            ftpd_log(s.copy_requested ? "Asked Wheel Wizard+ to copy the save, VR and ghosts" : "Copy to PC cancelled");
         }
 
         struct pollfd pfd = {.fd = s.control >= 0 ? s.control : server, .events = POLLIN};
