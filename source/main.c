@@ -156,7 +156,7 @@ int main(int argc, char **argv)
         char *lines[] = {
             "Retro Rewind is not on the SD card yet.",
             "",
-            "Start Wi-Fi sync so Wheel Wizard+ can send it?"};
+            "Start FTPD so Wheel Wizard+ can send it?"};
         if (rrc_prompt_yes_no(xfb, lines, 3) != RRC_PROMPT_RESULT_YES)
         {
             exit(0);

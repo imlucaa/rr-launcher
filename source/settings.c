@@ -84,7 +84,7 @@ static char *perform_updates_label = "Perform updates";
 
 static char *manage_channel_installation_label = "Manage channel installation";
 
-static char *wifi_sync_label = "Wi-Fi sync (Wheel Wizard+)";
+static char *wifi_sync_label = "FTPD";
 
 static char *exit_label = "Exit Channel";
 

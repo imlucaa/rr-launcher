@@ -1266,7 +1266,7 @@ struct rrc_result rrc_ftpd_run(void *xfb, int *files_received)
     ISFS_Initialize();
 
     char address[64];
-    snprintf(address, sizeof(address), "Wi-Fi sync: %s", inet_ntoa(ip));
+    snprintf(address, sizeof(address), "FTPD: %s", inet_ntoa(ip));
     rrc_con_clear(true);
     rrc_con_print_text_centered(FTPD_HEADER_ROW, address);
     rrc_con_print_text_centered(FTPD_HEADER_ROW + 1, "Enter this in Wheel Wizard+ > Sync to Wii");
