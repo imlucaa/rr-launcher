@@ -1,6 +1,7 @@
 # Dockerfile for the bare environment RR needs (dkp tools & necessary libraries installed into /opt). Used in CI
 
-FROM devkitpro/devkitppc
+# Pinned: the 20261016 image dropped libogc's gettime/diff_msec, which update.c and wii-mbedtls still use.
+FROM devkitpro/devkitppc:20260503
 
 COPY install-libs.sh ./
 
