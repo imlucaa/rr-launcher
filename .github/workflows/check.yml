@@ -39,7 +39,7 @@ jobs:
       - name: Upload channel build
         uses: actions/upload-artifact@v4
         with:
-          name: rr-launcher-wifisync
+          name: rr-launcher
           path: |
             *.dol
             runtime-ext/*.dol
